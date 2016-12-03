@@ -23,41 +23,35 @@ void print_row(int* row) {
   printf("\n");
 }
 
-void print_step(int* grid) {
-  for (int row = 0; row < GRID_WIDTH; row += DIM) {
-    print_row(grid + row);
-  }
-}
-
 int* get_row(int* grid, int y) {
-  while (y < 0) y += DIM;
-  while (y >= DIM) y -= DIM;
-
   return grid + (DIM * y);
 }
 
-int get_cell( int* grid, int x, int y) {
+void print_step(int* grid, int rows) {
+  for (int row = 0; row < rows; row ++) {
+    print_row(get_row(grid, row));
+  }
+}
+
+int get_cell( int* grid, int x, int y, int rows) {
   while (x < 0) x += DIM;
   while (x >= DIM) x -= DIM;
-
-  while (y < 0) y += DIM;
-  while (y >= DIM) y -= DIM;
 
   return grid[DIM * y + x];
 }
 
-int is_alive( int* grid, int x, int y) {
-  int was_alive = get_cell(grid, x, y);
+int is_alive( int* grid, int x, int y, int rows) {
+  int was_alive = get_cell(grid, x, y, rows);
 
   int neighbors[8] = {
-    get_cell(grid, x - 1, y),
-    get_cell(grid, x + 1, y),
-    get_cell(grid, x - 1, y - 1),
-    get_cell(grid, x, y - 1),
-    get_cell(grid, x + 1, y - 1),
-    get_cell(grid, x - 1, y + 1),
-    get_cell(grid, x, y + 1),
-    get_cell(grid, x + 1, y + 1)
+    get_cell(grid, x - 1, y, rows),
+    get_cell(grid, x + 1, y, rows),
+    get_cell(grid, x - 1, y - 1, rows),
+    get_cell(grid, x, y - 1, rows),
+    get_cell(grid, x + 1, y - 1, rows),
+    get_cell(grid, x - 1, y + 1, rows),
+    get_cell(grid, x, y + 1, rows),
+    get_cell(grid, x + 1, y + 1, rows)
   };
   int sum = 0;
   for (int i = 0; i < 8; i++) {
@@ -67,14 +61,12 @@ int is_alive( int* grid, int x, int y) {
   return (sum == 3 || (was_alive && sum == 2));
 }
 
-int* step( int* grid, int start_index, int size, int ID ) {
-  int* new_grid = calloc(GRID_WIDTH, sizeof(int));
-  for (int i = start_index; i < start_index + size; i++) {
+void step(int* last, int* curr, int split_size, int rows) {
+  for (int i = DIM; i < split_size + DIM; i++) {
     int x = i % DIM;
     int y = i / DIM;
-    new_grid[i] = is_alive(grid, x, y);
+    curr[i] = is_alive(last, x, y, rows);
   }
-  return new_grid;
 }
 
 int main ( int argc, char** argv ) {
@@ -128,43 +120,46 @@ int main ( int argc, char** argv ) {
 
   assert ( DIM % num_procs == 0 );
 
-  int* last = calloc(GRID_WIDTH, sizeof(int));
-  memcpy(last, global_grid, GRID_WIDTH*sizeof(int));
+  int* buffers[2];
+  buffers[0] = calloc(split_size + (2 * DIM), sizeof(int));
+  buffers[1] = calloc(split_size + (2 * DIM), sizeof(int));
+
+  int current_buf = 1;
+  memcpy(get_row(buffers[0], 1), get_row(global_grid, start_row), sizeof(int) * split_size);
 
   for ( iters = 0; iters < ITERATIONS; iters++ ) {
-    int* next = step(last, start_index, split_size, ID);
-
-    int* first_row = get_row(next, start_row);
-    int* last_row = get_row(next, end_row - 1);
+    int* last = buffers[(current_buf + 1) % 2];
+    int* curr = buffers[current_buf];
 
     MPI_Request requests[2];
 
-    MPI_Isend(first_row, DIM, MPI_INT, prev_id, FIRST_ROW, MPI_COMM_WORLD, &requests[0]);
-    MPI_Isend(last_row, DIM, MPI_INT, next_id, LAST_ROW, MPI_COMM_WORLD, &requests[1]);
+    MPI_Isend(get_row(last, 1), DIM, MPI_INT, prev_id, FIRST_ROW, MPI_COMM_WORLD, &requests[0]);
+    MPI_Isend(get_row(last, end_row - start_row), DIM, MPI_INT, next_id, LAST_ROW, MPI_COMM_WORLD, &requests[1]);
 
-    free(last);
-
-    last = next;
-    int* prev_row = get_row(last, start_row - 1);
-    int* next_row = get_row(last, end_row);
-
-    assert(MPI_Recv(prev_row, DIM, MPI_INT, prev_id, LAST_ROW, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
-    assert(MPI_Recv(next_row, DIM, MPI_INT, next_id, FIRST_ROW, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
+    assert(MPI_Recv(get_row(last, 0), DIM, MPI_INT, prev_id, LAST_ROW, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
+    assert(MPI_Recv(get_row(last, end_row - start_row + 1), DIM, MPI_INT, next_id, FIRST_ROW, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
 
     assert(MPI_Waitall(2, requests, NULL) == MPI_SUCCESS);
+
+    step(last, curr, split_size, end_row - start_row);
+    current_buf = (current_buf + 1) % 2;
   }
 
+  int* final = buffers[(current_buf + 1) % 2] + DIM;
   if ( ID == 0 ) {
+    memcpy(global_grid, final, split_size);
+
     for (int i = 1; i < num_procs; i++) {
-      assert(MPI_Recv(last + i*split_size, split_size, MPI_INT, i, ALL_ROWS, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
+      assert(MPI_Recv(global_grid + i*split_size, split_size, MPI_INT, i, ALL_ROWS, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
     }
     printf ( "\nIteration %d: final grid:\n", iters );
-    print_step(last);
+    print_step(global_grid, DIM);
   } else {
-    assert(MPI_Send(last + start_index, split_size, MPI_INT, 0, ALL_ROWS, MPI_COMM_WORLD) == MPI_SUCCESS);
+    assert(MPI_Send(final, split_size, MPI_INT, 0, ALL_ROWS, MPI_COMM_WORLD) == MPI_SUCCESS);
   }
 
-  free(last);
+  free(buffers[0]);
+  free(buffers[1]);
 
   // TODO: Clean up memory
   MPI_Finalize(); // finalize so I can exit
