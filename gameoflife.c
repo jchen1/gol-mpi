@@ -147,7 +147,7 @@ int main ( int argc, char** argv ) {
 
   int* final = buffers[(current_buf + 1) % 2] + DIM;
   if ( ID == 0 ) {
-    memcpy(global_grid, final, split_size);
+    memcpy(global_grid, final, split_size * sizeof(int));
 
     for (int i = 1; i < num_procs; i++) {
       assert(MPI_Recv(global_grid + i*split_size, split_size, MPI_INT, i, ALL_ROWS, MPI_COMM_WORLD, NULL) == MPI_SUCCESS);
